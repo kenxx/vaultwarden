@@ -430,7 +430,17 @@ pub async fn validate_webauthn_login(user_id: &UserId, response: &str, conn: &Db
         )
     };
 
-    let rsp: PublicKeyCredentialCopy = serde_json::from_str(response)?;
+    // Don't let the raw error type name ("Serde", "Webauthn") through as the message clients show to the user
+    let rsp: PublicKeyCredentialCopy = match serde_json::from_str(response) {
+        Ok(rsp) => rsp,
+        Err(e) => err!(
+            "Invalid WebAuthn response",
+            e.to_string(),
+            ErrorEvent {
+                event: EventType::UserFailedLogIn2fa
+            }
+        ),
+    };
     let rsp: PublicKeyCredential = rsp.into();
 
     let mut registrations = get_webauthn_registrations(user_id, conn).await?.1;
@@ -440,7 +450,16 @@ pub async fn validate_webauthn_login(user_id: &UserId, response: &str, conn: &Db
     // Because of this we check the flag at runtime and update the registrations and state when needed
     let backup_flags_updated = check_and_update_backup_eligible(&rsp, &mut registrations, &mut state)?;
 
-    let authentication_result = WEBAUTHN.finish_passkey_authentication(&rsp, &state)?;
+    let authentication_result = match WEBAUTHN.finish_passkey_authentication(&rsp, &state) {
+        Ok(result) => result,
+        Err(e) => err!(
+            "WebAuthn verification failed",
+            format!("{e:?}"),
+            ErrorEvent {
+                event: EventType::UserFailedLogIn2fa
+            }
+        ),
+    };
 
     for reg in &mut registrations {
         if ct_eq(reg.credential.cred_id(), authentication_result.cred_id()) {

@@ -1,38 +1,62 @@
-# bw CLI end-to-end test
+# bw CLI end-to-end tests
 
-Runs the official Bitwarden CLI against a Vaultwarden server through a full session:
+Runs the official Bitwarden CLI (`bw`) against Vaultwarden. Every scenario registers its own
+fresh account, logs in, then does a full vault round trip:
 
-`config server` → `login` → `unlock` → `create item` → `sync` → `list items` → `get password` / `get username` → `delete item` → `lock` → `logout`
+`unlock` → `create item` → `sync` → `list items` → `get password` / `get username` → `delete item` → `lock` → `logout`
 
-The CLI state goes in a temporary directory, so your own `bw` login is not touched.
+| Scenario        | What it checks |
+|-----------------|----------------|
+| `password`      | No 2FA. A wrong password is refused with a clear message. |
+| `totp`          | Authenticator app: no code → "Code is required", wrong code refused, valid code works. |
+| `email`         | Email 2FA: `bw` triggers the email, the code from it works, a wrong code is refused. Needs `MAIL_DIR`. |
+| `webauthn+totp` | WebAuthn checked through the identity API with a software security key (good, tampered and malformed responses). `bw` has no WebAuthn support, so it logs in with TOTP. |
+| `webauthn-only` | `bw` password login fails with "No providers available for this client" (same as the official server). `bw login --apikey` works and skips 2FA. |
 
-## Requirements
+## Quick start (local build)
 
-- Node.js 18+ (used by `register.mjs` and for JSON parsing)
-- `bw` on `PATH`, or let the script use `npx -y @bitwarden/cli`
-- **An HTTPS server URL.** Recent `bw` releases refuse plain `http://` servers, including `localhost`
-  (`Error: Insecure URL not allowed. All URLs must use HTTPS.`). For a self-signed certificate, point
-  `NODE_EXTRA_CA_CERTS` at it.
-
-## Usage
+`local.sh` starts a throwaway Vaultwarden (HTTPS with a self-signed cert, SQLite, a local SMTP
+sink for email codes) and runs all scenarios:
 
 ```bash
-# Existing account
-VW_URL=https://vault.example.com BW_EMAIL=me@example.com BW_PASSWORD='...' ./run.sh
-
-# Fresh local server: create the test account first (needs SIGNUPS_ALLOWED=true)
-NODE_EXTRA_CA_CERTS=./cert.pem VW_URL=https://localhost:8000 BW_REGISTER=1 ./run.sh
+cargo build --features sqlite
+tests/bw-cli/local.sh
 ```
 
-| Variable      | Default                       |
-|---------------|-------------------------------|
-| `VW_URL`      | `https://localhost:8000`      |
-| `BW_EMAIL`    | `bw-e2e@example.com`          |
-| `BW_PASSWORD` | `Bw-E2e-Test-Password-1`      |
-| `BW_REGISTER` | `0` (`1` = register first)    |
-| `BW_BIN`      | `bw`, else `npx -y @bitwarden/cli` |
+It needs `node` (18+), `openssl` and `curl`. If `bw` is not on `PATH`, `npx -y @bitwarden/cli` is used.
+On failure the server's errors/warnings are printed.
 
-The script exits non-zero if any check fails. The test item it creates is permanently deleted at the end.
+## Against another server
 
-If you run it behind an HTTP(S) proxy (`HTTPS_PROXY`), `bw` sends localhost requests through the proxy too,
-so unset it for local servers.
+```bash
+VW_URL=https://vault.example.com tests/bw-cli/run.sh
+```
+
+The server needs `SIGNUPS_ALLOWED=true` (test accounts are created) and a `DOMAIN` that matches
+`VW_URL`, or WebAuthn will fail. Set `MAIL_DIR` only if that server sends mail to `smtp-sink.mjs`.
+
+| Variable    | Default |
+|-------------|---------|
+| `VW_URL`    | `https://localhost:8000` |
+| `BW_BIN`    | `bw`, else `npx -y @bitwarden/cli` |
+| `MAIL_DIR`  | unset (email scenario skipped) |
+| `SCENARIOS` | `password totp email webauthn+totp webauthn-only` |
+
+## Things these tests ran into
+
+- **`bw` refuses plain `http://` servers**, `localhost` included:
+  `Error: Insecure URL not allowed. All URLs must use HTTPS.` Use HTTPS. For a self-signed
+  certificate, set `NODE_EXTRA_CA_CERTS=/path/to/cert.pem`.
+- **`bw` cannot do WebAuthn.** On an account whose only 2FA method is WebAuthn, `bw login`
+  stops with "No providers available for this client". Add TOTP or email 2FA as a second method,
+  or log in with your personal API key (`bw login --apikey`, then `bw unlock`).
+- When `HTTPS_PROXY` is set, `bw` also sends localhost requests through the proxy (`ECONNRESET`).
+- Each TOTP time step is accepted only once, so the tests wait for a new 30s step when needed.
+
+## Files
+
+- `run.sh`: the scenarios
+- `local.sh`: starts a test server, then runs `run.sh`
+- `vw.mjs`: helper for what `bw` cannot do: registration (client-side key derivation), 2FA
+  enrollment, TOTP codes, a software WebAuthn security key, reading email codes
+- `smtp-sink.mjs`: minimal SMTP server that writes mails to a directory
